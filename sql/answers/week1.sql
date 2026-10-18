@@ -10,7 +10,7 @@ FROM products
 WHERE discontinued = FALSE;
 
 -- 3. Lấy top 5 sản phẩm có `unit_price` cao nhất. Kết quả: `id, name, unit_price`.
-SELECT `id, name, unit_price
+SELECT id, name, unit_price
 FROM products
 ORDER BY unit_price DESC
 LIMIT 5;
