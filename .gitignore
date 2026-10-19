@@ -1,0 +1,11 @@
+# Chặn thư mục môi trường ảo (tùy thuộc vào tên bạn đặt)
+.venv/
+env/
+venv/
+ENV/
+
+# Chặn các file cache của Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
