@@ -206,17 +206,66 @@ WITH order_summary AS (
       AND o.order_date >= NOW() - INTERVAL '180 days'
     GROUP BY o.id, o.customer_id, o.order_date, o.shipping_fee
 )
---Gom nhóm theo khách hàng để tính R, F, M
 SELECT 
     customer_id,
-    EXTRACT(DAY FROM (NOW() - MAX(order_date)))::INTEGER AS recency_days, COUNT(DISTINCT order_id) AS frequency, SUM(order_total) AS monetary
+    EXTRACT(DAY FROM (NOW() - MAX(order_date)))::INTEGER AS recency_days, 
+    COUNT(DISTINCT order_id) AS frequency, 
+    SUM(order_total) AS monetary
 FROM order_summary
 GROUP BY customer_id;
 
 
-17. Phân hạng khách hàng theo RFM quintile (1..5) rồi tạo điểm `rfm_score = R + F + M`. Xuất top 20 khách có `rfm_score` cao nhất. Kết quả: `customer_id, r, f, m, rfm_score`.
+--17. Phân hạng khách hàng theo RFM quintile (1..5) rồi tạo điểm `rfm_score = R + F + M`. Xuất top 20 khách có `rfm_score` cao nhất. Kết quả: `customer_id, r, f, m, rfm_score`.
+WITH order_summary AS (
+    SELECT 
+        o.id AS order_id,
+        o.customer_id,
+        o.order_date,
+        SUM(od.quantity * od.unit_price * (1 - od.discount / 100.0)) + o.shipping_fee AS order_total
+    FROM orders o
+    JOIN order_details od ON o.id = od.order_id
+    WHERE o.status IN ('paid', 'shipped')
+      AND o.order_date >= NOW() - INTERVAL '180 days'
+    GROUP BY o.id, o.customer_id, o.order_date, o.shipping_fee
+),
+rfm_base AS (
+    SELECT 
+        customer_id,
+        EXTRACT(DAY FROM (NOW() - MAX(order_date)))::INTEGER AS recency_days,
+        COUNT(order_id) AS frequency,
+        SUM(order_total) AS monetary 
+    FROM order_summary
+    GROUP BY customer_id
+),
+rfm_scores AS (
+    SELECT 
+        customer_id,
+        NTILE(5) OVER (ORDER BY recency_days DESC) AS r, 
+        NTILE(5) OVER (ORDER BY frequency ASC) AS f,
+        NTILE(5) OVER (ORDER BY monetary ASC) AS m
+    FROM rfm_base
+)
+SELECT 
+    customer_id,
+    r, f, m,
+    (r + f + m) AS rfm_score
+FROM rfm_scores
+ORDER BY rfm_score DESC, m DESC
+LIMIT 20;
 18. Cohort theo tháng mua hàng đầu tiên: xác định `cohort_month` = tháng của đơn đầu tiên của mỗi KH, tính tỷ lệ KH quay lại đặt đơn ở các tháng +1, +2, +3… trong 6 tháng. Kết quả: ma trận `cohort_month, m0_customers, m1_retained_pct, ... m6_retained_pct`.
-19. Basket analysis (cặp sản phẩm hay mua cùng): tìm top 20 cặp `(product_a, product_b)` xuất hiện cùng một `order_id` nhiều nhất trong 6 tháng gần đây. Kết quả: `product_a, product_b, co_occurrence_count`.
+--19. Basket analysis (cặp sản phẩm hay mua cùng): tìm top 20 cặp `(product_a, product_b)` xuất hiện cùng một `order_id` nhiều nhất trong 6 tháng gần đây. Kết quả: `product_a, product_b, co_occurrence_count`.
+SELECT p1.name AS product_1,
+    p2.name AS product_2,
+    COUNT(*) AS times_bought_together
+FROM order_details od1 
+JOIN order_details od2 ON od1.order_id = od2.order_id AND od1.product_id < od2.product_id -- Tránh trùng sản phẩm và tránh lặp cặp (A,B) với (B,A)
+JOIN products p1 ON od1.product_id = p1.id
+JOIN products p2 ON od2.product_id = p2.id
+JOIN orders o ON od1.order_id = o.id
+WHERE o.status IN ('shipped','paid')
+GROUP BY p1.name, p2.name
+ORDER BY times_bought_together DESC
+LIMIT 20;
 20. Rolling 7-day revenue: mỗi ngày trong 90 ngày gần nhất, tính tổng doanh thu 7 ngày gần nhất (cửa sổ trượt). Kết quả: `date, revenue, revenue_7d_rollsum`.
 --21. Phát hiện "giá bán thấp hơn cost": tìm các dòng chi tiết có `unit_price * (1 - discount/100) < cost`. Kết quả: `order_id, product_id, effective_price, cost`.
 SELECT od.order_id, od.product_id, ROUND(od.unit_price * (1 - od.discount / 100.0), 2) AS effective_price, p.cost
@@ -236,7 +285,15 @@ GROUP BY p.id, p.name, p.stock
 HAVING SUM(od.quantity) > p.stock;
 
 23. Doanh thu "chuẩn hoá" theo khách: Z-score của `monetary` (bài 16) trong 1 năm gần nhất: `z = (monetary - avg(monetary)) / stddev(monetary)`. Kết quả: `customer_id, monetary, z_score`.
-24. Tỷ lệ hoàn/huỷ theo danh mục trong 6 tháng: "Hoàn/huỷ" = đơn `status IN ('cancelled','refunded')`. Mẫu số: tổng đơn của danh mục đó (theo sản phẩm xuất hiện trong đơn). Kết quả: `category, total_orders, cancelled_refunded_orders, rate`.
+--24. Tỷ lệ hoàn/huỷ theo danh mục trong 6 tháng: "Hoàn/huỷ" = đơn `status IN ('cancelled','refunded')`. Mẫu số: tổng đơn của danh mục đó (theo sản phẩm xuất hiện trong đơn). Kết quả: `category, total_orders, cancelled_refunded_orders, rate`.
+SELECT p.category, COUNT(DISTINCT o.id) AS total_orders,
+       COUNT(DISTINCT CASE WHEN o.status IN ('cancelled','refunded') THEN o.id END) AS cancelled_refunded_orders,
+       ROUND(COUNT(DISTINCT CASE WHEN o.status IN ('cancelled','refunded')) THEN o.id END)*100.0/NULLIF(COUNT(DISTINCT o.id),0),2) AS rate
+FROM orders o
+JOIN order_details od ON o.id = od.order_id
+JOIN products p ON od.product_id = p.id
+WHERE o.order_date >= NOW() - INTERVAL'6 months'
+GROUP BY p.category;
 --25. Xác định "sản phẩm mồ côi": sản phẩm không xuất hiện trong bất kỳ đơn `paid`/`shipped` trong 120 ngày gần đây nhưng `discontinued = FALSE`. Kết quả: `product_id, name, last_order_date`.
 SELECT p.id AS product_id, p.name, MAX(o.order_date) AS last_order_date
 FROM products p
@@ -248,7 +305,20 @@ HAVING MAX(o.order_date) < NOW() - INTERVAL '120 days'
     OR MAX(o.order_date) IS NULL;
 
 26. Tính LTV sơ bộ: với mỗi khách, lấy doanh thu tích luỹ trong 365 ngày kể từ đơn đầu tiên. Kết quả: `customer_id, first_order_date, ltv_365`.
-27. Doanh thu theo "kênh thanh toán" nhưng loại bỏ ảnh hưởng của khuyến mãi cực đoan: dùng median của giá trị đơn theo `payment_method` trong 90 ngày gần nhất. (Postgres: `percentile_cont(0.5) WITHIN GROUP (ORDER BY order_total)`). Kết quả: `payment_method, median_order_value`.
+--27. Doanh thu theo "kênh thanh toán" nhưng loại bỏ ảnh hưởng của khuyến mãi cực đoan: dùng median của giá trị đơn theo `payment_method` trong 90 ngày gần nhất. (Postgres: `percentile_cont(0.5) WITHIN GROUP (ORDER BY order_total)`). Kết quả: `payment_method, median_order_value`.
+WITH order_summary AS(
+  SELECT o.id AS order_id, 
+         o.payment_method,
+         SUM(od.quantity * od.unit_price * (1 - od.discount / 100.0)) + o.shipping_fee AS order_total
+  FROM orders o JOIN order_details od ON o.id = od.order_id
+  WHERE o.status IN ('paid','shipped')
+  AND o.order_date >= NOW() - INTERVAL'90 days'
+  GROUP BY o.id, o.payment_method, o.shipping_fee;
+)
+SELECT payment_method, 
+       ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY order_total)::NUMERIC, 2) AS medium_value
+FROM order_summary
+GROUP BY payment_method;
 28. Tìm đơn hàng "bất thường": đơn có `shipping_fee > percentile_cont(0.95)` theo phân phối phí ship 90 ngày gần nhất và tổng tiền < median 90 ngày. Kết quả: `order_id, shipping_fee, order_total`.
 29. Phân rã tăng trưởng doanh thu theo tháng gần nhất so với tháng trước thành 3 thành phần: số đơn tăng/giảm, giá trị trung bình đơn (AOV) tăng/giảm, phí ship tăng/giảm. Kết quả: một bảng trình bày `month, revenue, delta_orders, delta_aov, delta_shipping`.
 30. Tạo materialized view `mv_monthly_sales` lưu doanh thu/tháng (bao gồm phí ship) cho `paid`/`shipped`, rồi viết câu query đọc view này để: trả ra 12 tháng gần nhất, thêm cột `mom_growth_pct` (tăng trưởng % so với tháng trước). Kết quả: `month, revenue, mom_growth_pct`.
