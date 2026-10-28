@@ -322,3 +322,8 @@ GROUP BY payment_method;
 28. Tìm đơn hàng "bất thường": đơn có `shipping_fee > percentile_cont(0.95)` theo phân phối phí ship 90 ngày gần nhất và tổng tiền < median 90 ngày. Kết quả: `order_id, shipping_fee, order_total`.
 29. Phân rã tăng trưởng doanh thu theo tháng gần nhất so với tháng trước thành 3 thành phần: số đơn tăng/giảm, giá trị trung bình đơn (AOV) tăng/giảm, phí ship tăng/giảm. Kết quả: một bảng trình bày `month, revenue, delta_orders, delta_aov, delta_shipping`.
 30. Tạo materialized view `mv_monthly_sales` lưu doanh thu/tháng (bao gồm phí ship) cho `paid`/`shipped`, rồi viết câu query đọc view này để: trả ra 12 tháng gần nhất, thêm cột `mom_growth_pct` (tăng trưởng % so với tháng trước). Kết quả: `month, revenue, mom_growth_pct`.
+
+
+SELECT date, 
+  SUM(revenue) OVER (ORDER BY date ROWS BETWEEN UNNBOUNDED PRECEDING AND CURRENT ROW) AS revenue
+FROM sale s
