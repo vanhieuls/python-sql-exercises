@@ -252,7 +252,44 @@ SELECT
 FROM rfm_scores
 ORDER BY rfm_score DESC, m DESC
 LIMIT 20;
-18. Cohort theo tháng mua hàng đầu tiên: xác định `cohort_month` = tháng của đơn đầu tiên của mỗi KH, tính tỷ lệ KH quay lại đặt đơn ở các tháng +1, +2, +3… trong 6 tháng. Kết quả: ma trận `cohort_month, m0_customers, m1_retained_pct, ... m6_retained_pct`.
+--18. Cohort theo tháng mua hàng đầu tiên: xác định `cohort_month` = tháng của đơn đầu tiên của mỗi KH, tính tỷ lệ KH quay lại đặt đơn ở các tháng +1, +2, +3… trong 6 tháng. Kết quả: ma trận `cohort_month, m0_customers, m1_retained_pct, ... m6_retained_pct`.
+WITH valid_orders AS (
+  SELECT customer_id, date_trunc('month', order_date) AS order_month
+  FROM orders
+  WHERE status IN ('paid','shipped')
+),
+first_order AS(
+  SELECT customer_id, MIN(order_month) AS cohort_month
+  FROM valid_orders
+  GROUP BY customer_id
+),
+activity AS(
+  SELECT DISTINCT f.customer_id, f.cohort_month, 
+         ((EXTRACT(YEAR FROM v.order_month) - EXTRACT(YEAR FROM f.cohort_month)) * 12 + (EXTRACT(MONTH FROM v.order_month)-EXTRACT(MONTH FROM f.cohort_month)))::int
+         AS month_offset 
+  FROM first_order f JOIN valid_orders v USING (customer_id)
+),
+agg AS (
+  SELECT cohort_month,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 0) AS m0,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 1) AS m1,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 2) AS m2,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 3) AS m3,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 4) AS m4,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 5) AS m5,
+         COUNT(DISTINCT customer_id) FILTER (WHERE month_offset = 6) AS m6
+  FROM activity
+  GROUP BY cohort_month
+)
+SELECT cohort_month::date AS cohort_month, m0,
+       ROUND(100.0 * m1 / m0, 2) AS m1_retained,
+       ROUND(100.0 * m2 / m0, 2) AS m2_retained,
+       ROUND(100.0 * m3 / m0, 2) AS m3_retained,
+       ROUND(100.0 * m4 / m0, 2) AS m4_retained,
+       ROUND(100.0 * m5 / m0, 2) AS m5_retained,
+       ROUND(100.0 * m6 / m0, 2) AS m6_retained
+FROM agg
+ORDER BY cohort_month
 --19. Basket analysis (cặp sản phẩm hay mua cùng): tìm top 20 cặp `(product_a, product_b)` xuất hiện cùng một `order_id` nhiều nhất trong 6 tháng gần đây. Kết quả: `product_a, product_b, co_occurrence_count`.
 SELECT p1.name AS product_1,
     p2.name AS product_2,
@@ -266,7 +303,36 @@ WHERE o.status IN ('shipped','paid')
 GROUP BY p1.name, p2.name
 ORDER BY times_bought_together DESC
 LIMIT 20;
-20. Rolling 7-day revenue: mỗi ngày trong 90 ngày gần nhất, tính tổng doanh thu 7 ngày gần nhất (cửa sổ trượt). Kết quả: `date, revenue, revenue_7d_rollsum`.
+--20. Rolling 7-day revenue: mỗi ngày trong 90 ngày gần nhất, tính tổng doanh thu 7 ngày gần nhất (cửa sổ trượt). Kết quả: `date, revenue, revenue_7d_rollsum`.
+WITH days AS (
+  SELECT d::date AS date
+  FROM generate_series(CURRENT_DATE - 95, CURRENT_DATE, INTERVAL '1 day') AS d
+),
+daily AS (
+  SELECT o.order_date::date AS date,
+         SUM(od.)
+  FROM orders o JOIN order_details od ON o.id = od.order_id
+  WHERE o.status IN ('paid', 'shipped')
+    AND o.order_date >= CURRENT_DATE - 95
+  GROUP BY o.order_date::date
+),
+fill AS (
+  SELECT d.date, COALESCE(dl.revenue, 0) AS revenue
+  FROM days d
+  LEFT JOIN daily dl USING (date)
+)
+roll AS(
+  SELECT date, revenue,
+         SUM(revenue) OVER (
+          ORDER BY date
+          ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+         ) AS revenue_7d_rollsum
+  FROM fill
+)
+SELECT date, revenue, revenue_7d_rollsum
+FROM roll
+WHERE date >= CURRENT_DATE-89
+ORDER BY date;
 --21. Phát hiện "giá bán thấp hơn cost": tìm các dòng chi tiết có `unit_price * (1 - discount/100) < cost`. Kết quả: `order_id, product_id, effective_price, cost`.
 SELECT od.order_id, od.product_id, ROUND(od.unit_price * (1 - od.discount / 100.0), 2) AS effective_price, p.cost
 FROM order_details od
@@ -304,7 +370,26 @@ GROUP BY p.id, p.name
 HAVING MAX(o.order_date) < NOW() - INTERVAL '120 days' 
     OR MAX(o.order_date) IS NULL;
 
-26. Tính LTV sơ bộ: với mỗi khách, lấy doanh thu tích luỹ trong 365 ngày kể từ đơn đầu tiên. Kết quả: `customer_id, first_order_date, ltv_365`.
+--26. Tính LTV sơ bộ: với mỗi khách, lấy doanh thu tích luỹ trong 365 ngày kể từ đơn đầu tiên. Kết quả: `customer_id, first_order_date, ltv_365`.
+WITH order_rev AS (
+  SELECT o.id, o.customer_id, o.order_date, COALESCE(o.shipping_fee,0) + SUM(od.quantity * od.unit_price * (1 - od.discount / 100)) AS order_revenue
+  FROM orders o
+  JOIN order_details od ON od.order_id = o.id
+  WHERE o.status IN ('paid','shipped')
+  GROUP BY o.id, o.customer_id, o.order_date, o.shipping_fee
+),
+first_order AS (
+  SELECT customer_id, MIN(order_date) AS first_order_date
+  FROM order_rev
+  GROUP BY customer_id
+)
+SELECT f.customer_id, f.first_order_date, SUM(r.order_revenue) AS ltv_365
+FROM first_order f JOIN order_rev r 
+     ON r.customer_id = f.customer_id
+     AND r.order_date >= f.first_order_date
+     AND r.order_date <= f.first_order_date + INTERVAL '365 days'
+GROUP BY f.customer_id, f.first_order_date
+ORDER BY ltv_365 DESC;
 --27. Doanh thu theo "kênh thanh toán" nhưng loại bỏ ảnh hưởng của khuyến mãi cực đoan: dùng median của giá trị đơn theo `payment_method` trong 90 ngày gần nhất. (Postgres: `percentile_cont(0.5) WITHIN GROUP (ORDER BY order_total)`). Kết quả: `payment_method, median_order_value`.
 WITH order_summary AS(
   SELECT o.id AS order_id, 
@@ -319,11 +404,58 @@ SELECT payment_method,
        ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY order_total)::NUMERIC, 2) AS medium_value
 FROM order_summary
 GROUP BY payment_method;
-28. Tìm đơn hàng "bất thường": đơn có `shipping_fee > percentile_cont(0.95)` theo phân phối phí ship 90 ngày gần nhất và tổng tiền < median 90 ngày. Kết quả: `order_id, shipping_fee, order_total`.
+--28. Tìm đơn hàng "bất thường": đơn có `shipping_fee > percentile_cont(0.95)` theo phân phối phí ship 90 ngày gần nhất và tổng tiền < median 90 ngày. Kết quả: `order_id, shipping_fee, order_total`.
+WITH o90 AS(
+  SELECT o.id AS order_id, COALESCE(o.shipping_fee, 0) AS shipping_fee,
+         SUM(od.quantity*od.unit_price*(1-od.discount/100)) AS order_total
+  FROM orders o 
+  JOIN order_details od ON od.order_id = o.id
+  WHERE o.status IN ('paid','shipped')
+    AND o.order_date >= CURRENT_DATE - INTERVAL '90 days'
+  GROUP BY o.id, o.shipping_fee
+),
+threshold AS (
+  SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY shipping_fee) AS p95_ship,
+         percentile_cont(0.50) WITHIN GROUP (ORDER BY order_total)  AS median
+  FROM o90
+)
+SELECT o.order_id, o.shipping_fee, o.order_total
+FROM o90 o
+CROSS JOIN threshold t
+WHERE o.shipping_fee > t.p95_ship AND o.order_total < t.median
+ORDER BY o.shipping_fee DESC, o.order_total ASC;
 29. Phân rã tăng trưởng doanh thu theo tháng gần nhất so với tháng trước thành 3 thành phần: số đơn tăng/giảm, giá trị trung bình đơn (AOV) tăng/giảm, phí ship tăng/giảm. Kết quả: một bảng trình bày `month, revenue, delta_orders, delta_aov, delta_shipping`.
-30. Tạo materialized view `mv_monthly_sales` lưu doanh thu/tháng (bao gồm phí ship) cho `paid`/`shipped`, rồi viết câu query đọc view này để: trả ra 12 tháng gần nhất, thêm cột `mom_growth_pct` (tăng trưởng % so với tháng trước). Kết quả: `month, revenue, mom_growth_pct`.
+--30. Tạo materialized view `mv_monthly_sales` lưu doanh thu/tháng (bao gồm phí ship) cho `paid`/`shipped`, rồi viết câu query đọc view này để: trả ra 12 tháng gần nhất, thêm cột `mom_growth_pct` (tăng trưởng % so với tháng trước). Kết quả: `month, revenue, mom_growth_pct`.
+CREATE MATERIALIZED VIEW mv_monthly_sales AS
+WITH order_totals AS(
+  SELECT o.id,
+         date_trunc('month', o.order_date)::date AS month,
+         COALESCE(o.shipping_fee, 0) AS shipping_fee,
+         SUM(od.quantity * od.unit_price * (1 - od.discount / 100)) AS order_total
+  FROM orders o
+  JOIN order_details od ON od.order_id = o.id
+  WHERE o.status IN ('paid','shipped')
+  GROUP BY o.id, date_trunc('month', o.order_date), o.shipping_fee
+)
+SELECT month,
+       SUM(order_total + shipping_fee)  AS revenue
+FROM order_totals
+GROUP BY month;
+-- Index duy nhất: cần để dùng REFRESH ... CONCURRENTLY mà không khiến người dùng phải chờ (refresh ngầm)
+CREATE UNIQUE INDEX ux_mv_monthly_sales_month ON mv_monthly_sales (month);
 
-
-SELECT date, 
-  SUM(revenue) OVER (ORDER BY date ROWS BETWEEN UNNBOUNDED PRECEDING AND CURRENT ROW) AS revenue
-FROM sale s
+WITH g AS (
+  SELECT month,
+         revenue,
+         LAG(revenue) OVER (ORDER BY month) AS prev_revenue,
+         LAG(month)   OVER (ORDER BY month) AS prev_month
+  FROM mv_monthly_sales
+)
+SELECT month,
+       ROUND(revenue, 2) AS revenue,
+       CASE WHEN prev_month = month - INTERVAL '1 month'
+            THEN ROUND(100.0 * (revenue - prev_revenue) / NULLIF(prev_revenue, 0), 2)
+       END AS mom_growth_pct
+FROM g
+ORDER BY month DESC
+LIMIT 12;
