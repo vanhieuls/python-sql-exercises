@@ -187,5 +187,20 @@ UNION ALL SELECT 'products',    count() FROM shop.products
 UNION ALL SELECT 'users',       count() FROM shop.users
 UNION ALL SELECT 'access_logs', count() FROM shop.access_logs;
 
+CREATE TABLE shop.price_history
+(
+    product_id UInt64,
+    price      Decimal(18, 2),
+    valid_from DateTime
+)
+ENGINE = MergeTree
+ORDER BY (product_id, valid_from);
 
+INSERT INTO shop.price_history
+SELECT
+    product_id,
+    toDecimal64(toFloat64(list_price) * mult, 2),
+    now() - toIntervalDay(days_ago)
+FROM shop.products
+ARRAY JOIN [200, 120, 60, 20] AS days_ago, [1.0, 1.1, 1.2, 1.3] AS mult;
 
