@@ -98,3 +98,80 @@ SELECT id, payload, JSONExtractFloat(payload,'amount'), JSONExtractString(payloa
 FROM shop.text_samples
 ORDER BY id;
 
+-- ### Bài 68 — Đếm từ trong chuỗi (Medium)
+-- Đếm số từ trong một cột mô tả sản phẩm.
+-- > **Gợi ý:** `length(splitByChar(' ', trimBoth(name)))` hoặc `countMatches(name, '\\w+')`.
+--
+SELECT
+    id, product_name,
+    length(splitByChar(' ', trimBoth(product_name)))   AS words_hint,
+    countMatches(product_name, '\\w+')                 AS words_regex_ascii -- \w+ trong re2 chỉ khớp ký tự ASCII, nên ví dụ từ Ốp bị cắt còn p, lưng bị cắt thành l và ng
+FROM shop.text_samples
+ORDER BY id;
+
+-- ### Bài 69 — Chuẩn hóa chữ thường + bỏ dấu (Medium)
+-- Chuẩn hóa tên về chữ thường để nhóm không phân biệt hoa thường.
+-- > **Gợi ý:** `lower(name)`. Bỏ khoảng trắng thừa bằng `trimBoth`/`replaceRegexpAll`.
+--
+SELECT product_name,
+       lowerUTF8(trimBoth(product_name)) AS s1_lower, --Dùng lowerUTF8 thay vì lower bỏ qua chữ có dấu (Ố giữ nguyên).
+       replaceRegexpAll(s1_lower,'\\s+',' ') AS s1_spaces
+FROM shop.text_samples
+ORDER BY id;
+
+-- ### Bài 70 — Khớp nhiều mẫu cùng lúc (Hard)
+-- Kiểm tra `path` có khớp bất kỳ mẫu nào trong danh sách (multiMatch).
+-- > **Gợi ý:** `multiMatchAny(path, ['^/api', '^/admin', 'login'])` trả 1 nếu khớp ít nhất 1.
+--
+SELECT
+    multiMatchAny(path, ['^/api', '^/admin', 'login']) AS is_special, count() AS hits
+FROM shop.access_logs
+GROUP BY is_special;
+
+-- ### Bài 71 — Tách và pivot CSV trong một cột (Hard)
+-- Cột `csv_tags = 'a,b,c'`, bung thành hàng và đếm.
+-- > **Gợi ý:** `arrayJoin(splitByChar(',', csv_tags))`.
+-- 
+SELECT tag, count() AS occurrences,
+FROM
+(
+    SELECT id, arrayJoin(splitByChar(',', csv_tags)) AS tag
+    FROM shop.text_samples
+)
+WHERE tag != ''
+GROUP BY tag
+ORDER BY occurrences DESC, tag;
+
+-- ### Bài 72 — Fuzzy/similarity chuỗi (Hard)
+-- Tìm sản phẩm có tên gần giống 'iphone' (ngram distance).
+-- > **Gợi ý:** `ngramDistance(lower(name), 'iphone')` — giá trị nhỏ là gần giống; lọc ngưỡng.
+--
+SELECT
+    product_name,
+    round(ngramDistanceCaseInsensitiveUTF8(product_name, 'iphone'), 3) AS dist,
+    round(ngramSearchCaseInsensitiveUTF8(product_name, 'iphone'), 3)   AS search_score
+FROM shop.text_samples
+ORDER BY dist;
+
+-- ### Bài 73 — Mặt nạ IP / subnet (Medium)
+-- Nhóm `access_logs` theo subnet /24.
+-- > **Gợi ý:** `IPv4NumToString(bitAnd(toUInt32(ip), 0xFFFFFF00))` hoặc `IPv4CIDRToRange`.
+--
+SELECT
+    toIPv4('192.168.1.77')                                  AS ip,
+    IPv4CIDRToRange(ip, 24)                                 AS range24,
+    range24.1                                               AS network_addr,
+    range24.2                                               AS broadcast_addr,
+    concat(toString(range24.1), '/24')                      AS cidr;
+    
+-- ### Bài 74 — Thay thế có điều kiện hàng loạt (Medium)
+-- Chuẩn hóa `order_status` cũ sang nhãn mới (map).
+-- > **Gợi ý:** `transform(order_status, ['created','paid'], ['new','completed'], 'other')`.
+--
+SELECT
+    transform(order_status, ['created', 'paid'], ['new', 'completed'], 'other') AS new_status,
+    count() AS orders,
+    round(count() / sum(count()) OVER () * 100, 1) AS pct
+FROM shop.orders FINAL
+GROUP BY new_status
+ORDER BY orders DESC;
